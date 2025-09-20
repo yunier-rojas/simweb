@@ -1,4 +1,4 @@
-# SimWeb: Sync vs Async Server Simulation
+# SimWeb: Web Worker Simulation
 
 This project provides a **discrete-event simulation framework** (built with [SimPy](https://simpy.readthedocs.io)) to explore the performance trade-offs between **synchronous** and **asynchronous** web server workers.
 
