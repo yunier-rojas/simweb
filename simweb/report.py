@@ -1,70 +1,77 @@
-from typing import Iterable
-
-import numpy as np
-import pandas as pd
+from typing import Any
+import polars as pl
 import plotly.express as px
-
-REPORT_COLORS = [
-    "#6610f2",
-    "#dc3545",
-    "#ffc107",
-    "#198754",
-    "#0d6efd",
-]
+from plotly.graph_objs import Figure
 
 
-def aggregate_golden_metrics(df: pd.DataFrame, *, group_by: Iterable[str]) -> pd.DataFrame:
-    """
-    Aggregate golden metrics.
-    - throughput_rps, success_rate, saturation → mean across runs
-    - p9x_latency_ms is computed using pooled percentile
-    """
-    records = []
-    for keys, sub in df.groupby(list(group_by)):
-        # Pool per-run latency arrays into a single 1D array
-        latency_arrays = []
-        for a in sub["latency_ms"].to_numpy():
-            arr = np.asarray(a, dtype=float)
-            # Skip zero-dimensional arrays (invalid for pooling) and empty arrays
-            if arr.ndim == 0 or arr.size == 0:
-                continue
-            latency_arrays.append(arr.reshape(-1))
-
-        if not latency_arrays:
-            p95 = float("nan")
-            p99 = float("nan")
-        else:
-            pooled = np.concatenate(latency_arrays, dtype=float)
-            p95 = float(np.quantile(pooled, 0.95))
-            p99 = float(np.quantile(pooled, 0.99))
-        agg = {
-            **{k: v for k, v in zip(group_by, keys if isinstance(keys, tuple) else (keys,))},
-            "throughput_rps": sub["throughput_rps"].mean(),
-            "success_rate": sub["success_rate"].mean(),
-            "saturation": sub["saturation"].mean(),
-            "p95_latency_ms": p95,
-            "p99_latency_ms": p99,
-        }
-        records.append(agg)
-    return pd.DataFrame.from_records(records)
+from simweb.entities import RecordField
 
 
+def generate_time_charts(
+    df: pl.DataFrame,
+    layout: dict[str, dict[str, Any]] | None = None,
+    traces: dict[str, dict[str, Any]] | None = None,
+) -> list[Figure]:
 
-def set_data_labels(df: pd.DataFrame, *, column: str) -> list[str]:
-    column_order = df[column].unique().tolist()
-    df[column] = pd.Categorical(
-        df[column], categories=column_order, ordered=True
+    df = df.with_columns(
+        (pl.col("success_rate") * 100)
     )
-    return column_order
+
+    start_time = df["time_ms"].min()
+    end_time = df["time_ms"].max()
+
+    total_minutes = int((end_time - start_time) / 60_000)
+
+    figs = []
+    for metric, title, ylabel in [
+        ("throughput_rps", "Throughput over time", "Throughput (req/s)"),
+        ("p95_latency_ms", "p95 Latency over time", "Latency (ms)"),
+        ("success_rate", "Success Rate over time", "Success Rate (%)"),
+    ]:
+        fig = px.line(
+            df,
+            x="time_ms",
+            y=metric,
+            color="mode",
+            markers=False,
+            title=title,
+            labels={"time_ms": "Time (ms)", metric: ylabel, "mode": "Mode"},
+        )
+
+        fig.update_xaxes(
+            tickvals=[m * 60_000 for m in range(total_minutes + 1)],
+            ticktext=[str(m) for m in range(total_minutes + 1)],
+            title="Time (minutes)",
+        )
+
+        if traces:
+            fig.update_traces(**traces)
+
+        if layout:
+            fig.update_layout(**layout)
+
+        figs.append(fig)
+
+    return figs
 
 
-def make_golden_line_report(df: pd.DataFrame, *, x: str, label: str, html_path: str, intro_html: str) -> None:
+def generate_line_charts(
+    df: pl.DataFrame,
+    *,
+    x: str,
+    label: str,
+    layout: dict[str, dict[str, Any]] | None = None,
+    traces: dict[str, dict[str, Any]] | None = None,
+) -> list[Figure]:
+    df = df.with_columns(
+        (pl.col("success_rate") * 100)
+    )
+
     figs = []
     for metric, title, ylabel in [
         ("throughput_rps", "Throughput (req/s)", "Throughput"),
         ("p95_latency_ms", "p95 Latency (ms)", "Latency (ms)"),
         ("success_rate", "Success Rate (%)", "Success Rate"),
-        ("saturation", "Worker Saturation", "Utilization"),
     ]:
         fig = px.line(
             df,
@@ -74,23 +81,36 @@ def make_golden_line_report(df: pd.DataFrame, *, x: str, label: str, html_path: 
             markers=True,
             title=title,
             labels={x: label, metric: ylabel},
-            color_discrete_sequence=REPORT_COLORS,
+            color_discrete_sequence=px.colors.qualitative.Plotly,
         )
         figs.append(fig)
+        if traces:
+            fig.update_traces(**traces)
 
-    with open(html_path, "w", encoding="utf-8") as f:
-        f.write(intro_html)
-        for fig in figs:
-            f.write(fig.to_html(full_html=False, include_plotlyjs="cdn"))
+        if layout:
+            fig.update_layout(**layout)
+
+    return figs
 
 
-def make_golden_bar_report(df: pd.DataFrame, *, x: str, label: str, column_order: list[str], html_path: str, intro_html: str) -> None:
+def generate_bar_charts(
+    df: pl.DataFrame,
+    *,
+    x: str,
+    label: str,
+    column_order: list[str],
+    layout: dict[str, dict[str, Any]] | None = None,
+    traces: dict[str, dict[str, Any]] | None = None,
+) -> list[Figure]:
+    df = df.with_columns(
+        (pl.col("success_rate") * 100)
+    )
+
     figs = []
     for metric, title, ylabel in [
         ("throughput_rps", "Throughput (req/s)", "Throughput"),
         ("p95_latency_ms", "p95 Latency (ms)", "Latency (ms)"),
         ("success_rate", "Success Rate (%)", "Success Rate"),
-        ("saturation", "Worker Saturation", "Utilization"),
     ]:
         fig = px.bar(
             df,
@@ -101,11 +121,63 @@ def make_golden_bar_report(df: pd.DataFrame, *, x: str, label: str, column_order
             title=title,
             labels={x: label, metric: ylabel},
             category_orders={x: column_order},
-            color_discrete_sequence=REPORT_COLORS,
+            color_discrete_sequence=px.colors.qualitative.Plotly,
         )
+        if traces:
+            fig.update_traces(**traces)
+
+        if layout:
+            fig.update_layout(**layout)
+
         figs.append(fig)
 
-    with open(html_path, "w", encoding="utf-8") as f:
-        f.write(intro_html)
-        for fig in figs:
-            f.write(fig.to_html(full_html=False, include_plotlyjs="cdn"))
+    return figs
+
+
+def generate_heatmap_charts(
+    df: pl.DataFrame,
+    *,
+    x: str,
+    x_label: str,
+    y: str,
+    y_label: str,
+    title: str,
+    facet: RecordField | None = None,
+    layout: dict[str, dict[str, Any]] | None = None,
+    traces: dict[str, dict[str, Any]] | None = None,
+    colors: str = "plotly3"
+) -> list[Figure]:
+
+    df = df.with_columns(
+        (pl.col("success_rate") * 100)
+    )
+
+    figs = []
+    for metric, sub_title, ylabel, color in [
+        ("throughput_rps", "Throughput (req/s)", "Throughput", colors),
+        ("p95_latency_ms", "p95 Latency (ms)", "Latency (ms)", f"{colors}_r"),
+        ("success_rate", "Success Rate (%)", "Success Rate", colors),
+    ]:
+
+
+        fig = px.density_heatmap(
+            df,
+            x=x,
+            y=y,
+            z=metric,
+            facet_col=facet,
+            facet_col_wrap=2 if facet else 0,
+            histfunc="avg",
+            title=f"{title}: {sub_title}",
+            labels={x: x_label, y: y_label, metric: ylabel},
+            color_continuous_scale=color,
+        )
+
+        if traces:
+            fig.update_traces(**traces)
+
+        if layout:
+            fig.update_layout(**layout)
+        figs.append(fig)
+
+    return figs

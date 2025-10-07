@@ -1,10 +1,13 @@
-import pandas as pd
-
-from simweb.entities import ServerMode
+from simweb.entities import ServerMode, RecordField
 from simweb.experiment import run_experiments
-from simweb.report import aggregate_golden_metrics, make_golden_bar_report
+from simweb.files import load_csv, save_figures, load_styles
+from simweb.metrics import compute_group_metrics
+from simweb.report import generate_line_charts, generate_bar_charts
 
-# From https://github.com/jabbalaci/SpeedTests
+file_name = "experiment_runtime.csv"
+html_name = "experiment_runtime.html"
+all_df = load_csv(file_name)
+
 RUNTIMES = {
     "Rust": 1.10,
     "Java": 1.87,
@@ -12,50 +15,38 @@ RUNTIMES = {
     "JavaScript": 2.55,
     "CPython": 117.3,
 }
-
 BASE_CPU_MEAN_MS = 10.0
 
+CPU_PERCENTS = [
+    (l, BASE_CPU_MEAN_MS * v / 200.0 * 100) for l, v in RUNTIMES.items()
+]
 
-def run_runtime_experiments() -> pd.DataFrame:
-    return run_experiments(
+if all_df is None:
+    all_df = run_experiments(
         modes=[ServerMode.sync_mode, ServerMode.async_mode],
-        io_means=[200.0],
-        cpu_percents=[(l, BASE_CPU_MEAN_MS * v / 200.0 * 100) for l, v in RUNTIMES.items()],
-        rates=[100.0],
+        thread_count=3,
+        cpu_percents=CPU_PERCENTS,
+        io_means=[100.0],
+        rates=[50.0],
         io_limits=[64],
         queue_limits=[64],
         timeouts=[1000.0],
-        thread_count=2,
-        iterations=100,
         sim_time_ms=60_000.0,
-        warmup_ms=1000.0,
+        warmup_ms=10_000.0,
         seed=42,
+        iterations=10,
     )
+    all_df.write_csv(file_name)
 
+layout, traces = load_styles("lines.yaml")
+agg_df = compute_group_metrics(all_df, group_by=[RecordField.MODE, RecordField.LABEL_CPU])
+runtime_order = [item[0] for item in sorted(RUNTIMES.items(), key=lambda x: x[1])]
 
-def make_html_report(df: pd.DataFrame, html_path: str = "report_runtime.html") -> None:
-    intro_html = """
-<h1>Runtime Experiment Report</h1>
-<p>
-Comparing runtimes (C baseline) across sync (thread pool) and async (event loop) models.<br>
-Golden Metrics shown: Throughput, p95 Latency, Success Rate, Saturation.<br>
-Each bar = mean across iterations.
-</p>
-"""
-    agg_df = aggregate_golden_metrics(df, group_by=["label_cpu", "mode"])
-
-    runtime_order = df["label_cpu"].unique().tolist()
-    make_golden_bar_report(
-        agg_df,
-        x="label_cpu",
-        label="Runtime",
-        column_order=runtime_order,
-        html_path=html_path,
-        intro_html=intro_html,
-    )
-
-
-if __name__ == "__main__":
-    df = run_runtime_experiments()
-    make_html_report(df)
-    print("✅ Saved report_runtime.html")
+figs = generate_bar_charts(
+    agg_df,
+    x=RecordField.LABEL_CPU,
+    label="Runtime",
+    column_order=runtime_order,
+    layout=layout,
+)
+save_figures(figs, html_name)

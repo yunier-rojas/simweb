@@ -1,10 +1,11 @@
 from typing import Any, Protocol, Callable
 import simpy
 import numpy as np
+import polars as pl
 
-from .entities import Memory, ServerMode
-from .metrics import RequestRecord
+from .entities import ServerMode, RequestStatus
 from . import samplers
+
 
 class ServiceFn(Protocol):
     def __call__(
@@ -13,12 +14,21 @@ class ServiceFn(Protocol):
             env: simpy.Environment,
             worker_pool: simpy.Resource,
             io_pool: simpy.Resource,
-            counters: Memory,
             cpu_pre: float,
             cpu_post: float,
             io_wait: float,
-    ) -> Any:
-        ...
+    ) -> Any: ...
+
+
+# ----------------------------
+# Status encoding
+# ----------------------------
+STATUS_MAP = {
+    RequestStatus.completed: 0,
+    RequestStatus.timeout: 1,
+    RequestStatus.dropped: 2,
+}
+
 
 # ----------------------------
 # Service types
@@ -29,34 +39,31 @@ def _sync_service(
         env: simpy.Environment,
         worker_pool: simpy.Resource,
         io_pool: simpy.Resource,
-        counters: Memory,
         cpu_pre: float,
         cpu_post: float,
         io_wait: float,
-):
-    total_hold = 0.0
+) -> float:
+    """Return total CPU time used by this request."""
+    cpu_time = 0.0
     with worker_pool.request() as req:
         yield req
         # CPU before I/O
         if cpu_pre > 0:
-            counters.busy_time += cpu_pre
-            total_hold += cpu_pre
+            cpu_time += cpu_pre
             yield env.timeout(cpu_pre)
 
         # I/O (thread is blocked!)
         if io_wait > 0:
             with io_pool.request() as io_req:
                 yield io_req
-                total_hold += io_wait
                 yield env.timeout(io_wait)
 
         # CPU after I/O
         if cpu_post > 0:
-            counters.busy_time += cpu_post
-            total_hold += cpu_post
+            cpu_time += cpu_post
             yield env.timeout(cpu_post)
 
-    counters.worker_occupied_time += total_hold
+    return cpu_time
 
 
 def _async_service(
@@ -64,19 +71,18 @@ def _async_service(
         env: simpy.Environment,
         worker_pool: simpy.Resource,
         io_pool: simpy.Resource,
-        counters: Memory,
         cpu_pre: float,
         cpu_post: float,
         io_wait: float,
-):
-    total_hold = 0.0
+) -> float:
+    """Return total CPU time used by this request."""
+    cpu_time = 0.0
 
     # CPU before I/O
     if cpu_pre > 0:
         with worker_pool.request() as req1:
             yield req1
-            counters.busy_time += cpu_pre
-            total_hold += cpu_pre
+            cpu_time += cpu_pre
             yield env.timeout(cpu_pre)
 
     # I/O (thread released!)
@@ -89,16 +95,16 @@ def _async_service(
     if cpu_post > 0:
         with worker_pool.request() as req2:
             yield req2
-            counters.busy_time += cpu_post
-            total_hold += cpu_post
+            cpu_time += cpu_post
             yield env.timeout(cpu_post)
 
-    counters.worker_occupied_time += total_hold
+    return cpu_time
 
 
 # ----------------------------
 # Request process
 # ----------------------------
+
 def _request_process(
         *,
         env: simpy.Environment,
@@ -107,16 +113,18 @@ def _request_process(
         worker_pool: simpy.Resource,
         io_pool: simpy.Resource,
         cpu_times: Callable[[], float],
-        io_times:  Callable[[], float],
+        io_times: Callable[[], float],
+        warmup_ms: float,
         timeout_limit: float,
         rng: np.random.Generator,
-        records: list[RequestRecord],
-        counters: Memory,
-        arrived_in_steady: Callable[[float], bool],
+        # column stores
+        req_ids, arrivals, finishes, latencies, statuses,
 ) -> Any:
     arrival_time = env.now
+    recorded = False
 
     def service() -> Any:
+        nonlocal recorded
         total_cpu = cpu_times()
         split = rng.random()
         cpu_pre = total_cpu * split
@@ -124,43 +132,46 @@ def _request_process(
         io_wait = io_times()
 
         try:
-            yield from service_fn(
+            _ = yield from service_fn(
                 env=env,
                 worker_pool=worker_pool,
                 io_pool=io_pool,
                 cpu_pre=cpu_pre,
                 cpu_post=cpu_post,
                 io_wait=io_wait,
-                counters=counters,
             )
-
-            finish_time = env.now
-            counters.completed += 1
-            counters.in_system -= 1
-            records.append(
-                RequestRecord(
-                    req_id=req_id,
-                    arrival_time=arrival_time,
-                    finish_time=finish_time,
-                    latency_ms=finish_time - arrival_time,
-                    arrived_in_steady=arrived_in_steady(arrival_time),
-                )
-            )
+            status = RequestStatus.completed
         except simpy.Interrupt:
-            return
+            # Timeout happened mid-service
+            _ = 0.0
+            status = RequestStatus.timeout
+
+        finish_time = env.now
+        if arrival_time >= warmup_ms and not recorded:
+            req_ids.append(req_id)
+            arrivals.append(arrival_time)
+            finishes.append(finish_time)
+            latencies.append(finish_time - arrival_time)
+            statuses.append(STATUS_MAP[status])
+            recorded = True
 
     svc_proc = env.process(service())
     if timeout_limit > 0:
         timeout_evt = env.timeout(timeout_limit)
         result = yield svc_proc | timeout_evt
-        if timeout_evt in result:
-            counters.timed_out += 1
-            counters.in_system -= 1
+        if timeout_evt in result and not recorded:
+            finish_time = env.now
+            if arrival_time >= warmup_ms:
+                req_ids.append(req_id)
+                arrivals.append(arrival_time)
+                finishes.append(finish_time)
+                latencies.append(timeout_limit)
+                statuses.append(STATUS_MAP[RequestStatus.timeout])
             try:
                 svc_proc.interrupt("timeout")
             except RuntimeError:
                 pass
-            return
+            recorded = True
     else:
         yield svc_proc
 
@@ -168,50 +179,66 @@ def _request_process(
 # ----------------------------
 # Arrival process
 # ----------------------------
+
 def _arrival_process(
         *,
         env: simpy.Environment,
         worker_pool: simpy.Resource,
         io_pool: simpy.Resource,
-        records: list[RequestRecord],
         service_fn: ServiceFn,
-        counters: Memory,
         rng: np.random.Generator,
         cpu_times: Callable[[], float],
-        io_times:  Callable[[], float],
-        arrival_times:  Callable[[], float],
+        io_times: Callable[[], float],
+        arrival_times: Callable[[], float],
         warmup_ms: float,
         max_in_system: int,
         timeout_ms: float,
+        # column stores
+        req_ids, arrivals, finishes, latencies, statuses,
 ) -> Any:
     req_id = 0
+    in_system = 0
 
-    arrived_in_steady = lambda ms: warmup_ms <= ms
     while True:
         arrival = arrival_times()
         yield env.timeout(arrival)
-        counters.arrivals += 1
-        if counters.in_system >= max_in_system:
-            counters.dropped += 1
+
+        if in_system >= max_in_system:
+            # Request is dropped
+            req_id += 1
+            now = env.now
+            req_ids.append(req_id)
+            arrivals.append(now)
+            finishes.append(now)
+            latencies.append(0.0)
+            statuses.append(STATUS_MAP[RequestStatus.dropped])
             continue
+
         req_id += 1
-        counters.in_system += 1
-        env.process(
-            _request_process(
+        in_system += 1
+
+        def wrap_request():
+            nonlocal in_system
+            yield from _request_process(
                 env=env,
                 req_id=req_id,
                 service_fn=service_fn,
                 worker_pool=worker_pool,
-                rng=rng,
                 io_pool=io_pool,
                 cpu_times=cpu_times,
                 io_times=io_times,
-                records=records,
-                counters=counters,
-                arrived_in_steady=arrived_in_steady,
+                warmup_ms=warmup_ms,
                 timeout_limit=timeout_ms,
+                rng=rng,
+                req_ids=req_ids,
+                arrivals=arrivals,
+                finishes=finishes,
+                latencies=latencies,
+                statuses=statuses,
             )
-        )
+            in_system -= 1
+
+        env.process(wrap_request())
 
 
 # ----------------------------
@@ -238,10 +265,11 @@ def simulate_server(
         arrival_dist: str = "poisson",
         burst_factor: float = 5.0,
         burst_prob: float = 0.1,
-) -> tuple[list[RequestRecord], Memory, int]:
+) -> pl.DataFrame:
     env = simpy.Environment()
-    records: list[RequestRecord] = []
-    counters = Memory()
+
+    # column stores
+    req_ids, arrivals, finishes, latencies, statuses = ([] for _ in range(5))
 
     is_async = mode is ServerMode.async_mode
     num_threads = 1 if is_async else thread_count
@@ -249,9 +277,9 @@ def simulate_server(
     worker_pool = simpy.Resource(env, capacity=num_threads)
     io_pool = simpy.Resource(env, capacity=io_limit)
     max_in_system = num_threads + queue_limit
-    rng=np.random.default_rng(seed)
+    rng = np.random.default_rng(seed)
 
-
+    # Samplers
     cpu_func = getattr(samplers, f"time_{cpu_dist}")
     cpu_times = cpu_func(rng=rng, mean_ms=cpu_mean_ms, sigma=cpu_lognorm_sigma)
 
@@ -275,10 +303,23 @@ def simulate_server(
             rng=rng,
             warmup_ms=warmup_ms,
             timeout_ms=timeout_ms,
-            records=records,
-            counters=counters,
+            req_ids=req_ids,
+            arrivals=arrivals,
+            finishes=finishes,
+            latencies=latencies,
+            statuses=statuses,
             max_in_system=max_in_system,
         )
     )
     env.run(until=sim_time_ms)
-    return records, counters, num_threads
+
+    # Build Polars DataFrame
+    return pl.DataFrame(
+        {
+            "req_id": req_ids,
+            "arrival_time": arrivals,
+            "finish_time": finishes,
+            "latency_ms": latencies,
+            "status": statuses,   # 0=completed, 1=timeout, 2=dropped
+        }
+    )

@@ -1,0 +1,75 @@
+layout:
+  title:
+    font:
+      family: "Arial, sans-serif"
+      size: 70
+      color: "#050a30"
+    x: 0.5
+    xanchor: "center"
+    yanchor: "top"
+
+  xaxis:
+    title_standoff: 40
+    showgrid: true
+    linecolor: "#050a30"
+    linewidth: 5
+    tickfont:
+      family: "Arial, sans-serif"
+      size: 20
+      color: "#050a30"
+    title:
+      font:
+        family: "Arial, sans-serif"
+        size: 40
+        color: "#050a30"
+
+  yaxis:
+    title_standoff: 40
+    showgrid: true
+    linecolor: "#050a30"
+    linewidth: 5
+    tickfont:
+      family: "Arial, sans-serif"
+      size: 20
+      color: "#050a30"
+    title:
+      font:
+        family: "Arial, sans-serif"
+        size: 40
+        color: "#050a30"
+
+  legend:
+    title:
+      text: null   # removes "Mode"
+    orientation: "h"
+    x: 0.5
+    y: -0.15
+    xanchor: "center"
+    yanchor: "top"
+    font:
+      family: "Arial, sans-serif"
+      size: 60
+      color: "#050a30"
+
+  plot_bgcolor: "white"
+  paper_bgcolor: "white"
+
+  font:
+    family: "Arial, sans-serif"
+    size: 20
+    color: "#050a30"
+
+  colorway:
+    - "#6610f2"
+    - "#dc3545"
+    - "#ffc107"
+    - "#198754"
+    - "#0d6efd"
+
+traces:
+  mode: "markers+lines"
+  marker:
+    size: 12
+    symbol: "circle"
+  line:
+    width: 1

@@ -1,50 +1,41 @@
-import pandas as pd
-
-from simweb.entities import ServerMode
+from simweb.entities import ServerMode, RecordField
 from simweb.experiment import run_experiments
-from simweb.report import aggregate_golden_metrics, make_golden_line_report
+from simweb.files import load_csv, save_figures, load_styles
+from simweb.metrics import compute_group_metrics
+from simweb.report import generate_line_charts
 
+file_name = "experiment_rate.csv"
+html_name = "experiment_rate.html"
+all_df = load_csv(file_name)
 
-ARRIVAL_RATES = [1, 5, 10, 20, 50, 100, 200]  # req/s
+ARRIVAL_RATES = [5 * n for n in range(1,  20)]
 
-def run_rate_experiments(
-) -> pd.DataFrame:
-    return run_experiments(
+if all_df is None:
+    all_df = run_experiments(
         modes=[ServerMode.sync_mode, ServerMode.async_mode],
-        io_means=[200.0],
-        cpu_percents=[10],
+        thread_count=3,
+        cpu_percents=[15],
+        io_means=[100.0],
         rates=ARRIVAL_RATES,
         io_limits=[64],
         queue_limits=[64],
         timeouts=[1000.0],
-        thread_count=2,
-        iterations=100,
-        sim_time_ms=60_000.0,
-        warmup_ms=1000.0,
+        sim_time_ms=600_000.0,
+        warmup_ms=10_000.0,
         seed=42,
+        iterations=10,
     )
+    all_df.write_csv(file_name)
 
 
-def make_html_report(df: pd.DataFrame, html_path: str = "report_rate.html") -> None:
-    intro_html = """
-<h1>Rate Experiment Report</h1>
-<p>
-Exploring impact of increasing arrival rate (req/s) on sync vs async.<br>
-Golden Metrics shown: Throughput, p95 Latency, Success Rate, Saturation.<br>
-Each point = mean across iterations.
-</p>
-"""
-    agg_df = aggregate_golden_metrics(df, group_by=["arrival_rate_rps", "mode"])
-    make_golden_line_report(
-        agg_df,
-        x="arrival_rate_rps",
-        label="Req/s",
-        html_path=html_path,
-        intro_html=intro_html,
-    )
+layout, traces = load_styles("lines.yaml")
+agg_df = compute_group_metrics(all_df, group_by=[RecordField.MODE, RecordField.LABEL_RATE])
 
-
-if __name__ == "__main__":
-    df = run_rate_experiments()
-    make_html_report(df)
-    print("✅ Saved report_rate.html")
+figs = generate_line_charts(
+    agg_df,
+    x=RecordField.LABEL_RATE,
+    label="Req/s",
+    layout=layout,
+    traces=traces,
+)
+save_figures(figs, html_name)
