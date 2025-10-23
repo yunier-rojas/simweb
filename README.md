@@ -1,251 +1,154 @@
-# simweb – Sync vs Async Webserver Simulation
+# **simweb** – Sync & Async Webserver Simulation
 
-This project is a **discrete-event simulation framework** (built on [SimPy](https://simpy.readthedocs.io/)) for studying the performance of **synchronous (thread-per-request)** vs **asynchronous (event loop)** server models.
+**simweb** is a **discrete-event simulation** (built on [SimPy](https://simpy.readthedocs.io/)) for comparing **synchronous (thread-per-request)** and **asynchronous (event loop)** server models.
 
-It provides a sandbox to explore when **async really helps** and when it does not, using the **four golden signals** from [Google SRE best practices](https://sre.google/sre-book/monitoring-distributed-systems/):
+It helps explore how **async** and **async** processes behave under different workloads and how they impact the **four golden signals** from [Google SRE](https://sre.google/sre-book/monitoring-distributed-systems/):
 
-- **Throughput** (requests per second)
-- **Latency** (p95 / p99)
-- **Success Rate** (% of requests completed without drop/timeout)
-- **Saturation** (worker utilization)
+* **Throughput** – requests per second
+* **Latency** – p95 / p99
+* **Success Rate** – completed requests (%)
 
-Results can be visualized as time-series dashboards and aggregated reports.
 
 ---
 
-## 🔍 Motivation
+## 🔍 Why Simulation
 
-Real benchmarking of web systems is **hard**:
-- Real workloads are often **too complex to replicate**.
-- Mock workloads are **too simplistic**.
-- Iteration is slow (10min benchmark × 6 configs = 1h).
-- Results are **hard to reproduce** due to hardware, kernel, or network differences.
+Benchmarking real systems is **slow and inconsistent**:
+
+* Real workloads are hard to reproduce.
+* Synthetic ones are too simple.
+* Hardware, kernel, or network differences skew results.
 
 Simulation offers:
-- **Fast iteration** (seconds instead of hours).
-- **Controlled knobs** (CPU %, IO wait, arrival rate, timeouts, limits).
-- **Fair sync vs async comparisons** in identical conditions.
-- **Educational value** — explains why async shines in IO-bound cases but degrades for CPU-bound workloads.
+
+* **Fast iteration** (seconds, not hours)
+* **Controlled variables** (CPU%, IO wait, rate, timeouts)
+* **Fair sync vs async comparison** under identical load
+* **Educational clarity** — run designed scenarios in isolated environments
 
 ---
 
 ## ⚙️ Models
 
-We model a **web worker process**:
+### Web Worker
 
-- **Sync mode**  
-  - Multiple threads (best practice: ~2–4 per core).  
-  - Threads block during IO.  
-  - Worker pool capacity = `thread_count`.
+**Sync**
 
-- **Async mode**  
-  - Single-threaded event loop.  
-  - CPU phases block the loop, but IO waits release it.  
-  - Worker pool capacity = `1`.
+* Multiple threads (≈2–4 per core)
+* Threads block during IO
+* Worker pool size = thread count
 
-### Simulation pipeline
+**Async**
 
-1. **Clients** generate requests according to arrival distributions:
-   - Poisson (default)
-   - Bursty arrivals (optional)
-2. **Admission gate** applies `queue_limit` (drop if exceeded).
-3. **Worker pool** executes the service logic:
-   - CPU work (pre + post IO split)
-   - IO wait
-4. **Timeouts** cut off long-running requests.
-5. **Request records** store:
-   - arrival / finish time
-   - latency
-   - status (`completed`, `dropped`, `timeout`)
-   - cpu_time used
+* Single-threaded event loop
+* CPU work blocks, IO waits release
+* Worker pool size = 1
+
+### Pipeline
+
+1. Clients generate requests (Poisson or bursty)
+2. Admission gate enforces queue limit
+3. Worker pool runs service logic (CPU → IO → CPU)
+4. Timeouts stop long requests
+5. Records include arrival, finish, latency, status, CPU time
 
 ---
 
 ## 📊 Metrics
 
-Two complementary aggregation methods:
+### Group metrics
 
-- **Group metrics**  
-  Aggregate by experiment parameters (mode, rate, cpu%) across replications.
-  - Throughput: mean completed / wall time
-  - Success rate: mean %
-  - Saturation: mean utilization
-  - Latency: pooled p95, p99 from all requests
+Aggregate by experiment parameters (e.g. mode, rate, CPU%).
 
-- **Time metrics**  
-  Bin requests by finish time (default 1s bins) to see golden signals over time.  
-  Useful for transient analysis (e.g., queues filling, saturation waves).
+* Throughput = completed / wall time
+* Success rate = % completed
+* Latency = pooled p95/p99
 
----
+### Time metrics
 
-## 📈 Example Results
+Aggregate in time bins (default 1s) to show golden signals over time — ideal for spotting transient effects like queue buildup.
 
-- **Async wins** when requests are mostly IO.  
-- **Sync wins** or is at least more predictable when CPU dominates.  
-- Increasing arrival rate → throughput scales until **saturation**, then:
-  - Latency spikes near **timeout**
-  - Success rate collapses
-  - Throughput plateaus or drops
 
 ---
 
-## 📦 Usage
-
-### Run experiments
+## 🧪 Run Experiments
 
 ```bash
 python experiments/experiment_cpu_rate.py
-````
+```
 
 Generates:
 
 * `report_cpu_rate.csv` – raw results
-* `report_cpu_rate.html` – interactive plots:
+* `report_cpu_rate.html` – plots (heatmaps, line charts)
 
-    * Heatmaps (CPU% × Rate)
-    * Line charts (throughput vs rate, per CPU%)
-
-### Run dashboard (time series)
+### Time-series dashboard
 
 ```bash
 python experiments/dashboard.py
 ```
 
-Generates:
+Outputs:
 
-* `dashboard.html` – time-series charts of golden metrics.
+* `dashboard.html` – golden metrics over time
 
 ---
 
-## 🧪 Assumptions
+## 🧩 Assumptions
 
-* 1 process per core.
-* Sync: 2–4 threads per core (fixed `thread_count`).
-* Async: 1 event-loop thread per process.
-* Request CPU is split randomly between pre-IO and post-IO phases.
-* IO and CPU service times follow **exponential** or **log-normal** distributions.
-* Arrivals are Poisson (default), but bursty arrivals supported.
+* 1 process per core
+* Sync: 2–4 threads/core
+* Async: 1 event loop/core
+* CPU split between pre/post IO
+* IO + CPU ~ exponential or log-normal
+* Arrivals ~ Poisson (bursty optional)
 
 ---
 
 ## ⚠️ Limitations
 
-* Simulation is **not a real benchmark**; results are illustrative.
-* Hardware effects (cache, syscalls, kernel scheduler) are ignored.
-* Only models *one process*; no distributed scaling yet.
-* Simplified service model (CPU+IO only, no pipelining/middleware).
-* Async model assumes perfect IO multiplexing, no context-switch overhead.
-* Queueing is **FIFO only** (no prioritization, no fairness).
+* Not a real benchmark — **illustrative only**
+* Ignores hardware and OS-level effects
+* Single process only
+* Perfect async assumed
 
 ---
 
-## 🖼️ Architecture Diagram
+## 🖼️ Architecture
 
 ### Sync
 
-```plantuml
-@startuml
-skinparam backgroundColor #FFFFFF
-skinparam sequence {
-  ArrowColor #050a30
-  LifeLineBorderColor #050a30
-  LifeLineBackgroundColor #fefefe
-  ParticipantBorderColor #050a30
-  ParticipantBackgroundColor #fefefe
-  ParticipantFontSize 14
-}
+![Sync process](https://img.plantuml.biz/plantuml/png/NP6nRiCm34HtVGMHgHto0nwA62bQU7AXfl2isZS8aIM5efFVhsJ7Q9n10dZlH1wXGnB3CerEcLu2qz5PU54nYxQtqNYXNSrihyRjo2IgjqZZCY79ZFGMTO7Fu3IZRekQTbQRLgbb7ktVgAxe4nvi1CHBMsMSqCVad2AgYsTnL_JE8Igu1Ahx7b4mh0vTqNVPADUwr5sLBPV9CkWs1rf1DXw_VYWoLgLfgtpePgpGowyB_Hd3QuPPszyVX34w29vxX5JcbR0dEo9CfRfRriJ_O8xzqEd9g95YyAaG-E5X3Gq7a_MY7lAL_-mF "Sync")
 
-actor Client #050a30
-participant "Arrival Process" as Arrival #75b798
-participant "Request Process" as Request #d0ebff
-participant "Worker Pool" as Workers #f8d7da
-participant "IO Pool" as IO #ffeeba
+[Open in PlantUML Editor](https://editor.plantuml.com/uml/NP6nRiCm34HtVGMHgHto0nwA62bQU7AXfl2isZS8aIM5efFVhsJ7Q9n10dZlH1wXGnB3CerEcLu2qz5PU54nYxQtqNYXNSrihyRjo2IgjqZZCY79ZFGMTO7Fu3IZRekQTbQRLgbb7ktVgAxe4nvi1CHBMsMSqCVad2AgYsTnL_JE8Igu1Ahx7b4mh0vTqNVPADUwr5sLBPV9CkWs1rf1DXw_VYWoLgLfgtpePgpGowyB_Hd3QuPPszyVX34w29vxX5JcbR0dEo9CfRfRriJ_O8xzqEd9g95YyAaG-E5X3Gq7a_MY7lAL_-mF)
 
-Client -> Arrival: Generate request
-alt System full
-    Arrival -> Client: Reject (Dropped)
-else Accepted
-    Arrival -> Request: Start request_process
-    Request -> Workers: Acquire worker
-    Request -> Request: CPU Pre
-    Request -> IO: Acquire I/O (worker blocked!)
-    IO --> Request: I/O complete
-    Request -> Request: CPU Post
-    alt Timeout
-        Request -> Client: Timeout
-    else Completed
-        Request -> Client: Response
-    end
-    Request -> Workers: Release worker
-end
-@enduml
-
-```
 
 ### Async
 
-```plantuml
-@startuml
-skinparam backgroundColor #FFFFFF
-skinparam sequence {
-  ArrowColor #050a30
-  LifeLineBorderColor #050a30
-  LifeLineBackgroundColor #fefefe
-  ParticipantBorderColor #050a30
-  ParticipantBackgroundColor #fefefe
-  ParticipantFontSize 14
-}
 
-actor Client #050a30
-participant "Arrival Process" as Arrival #75b798
-participant "Request Process" as Request #d0ebff
-participant "Worker Pool" as Workers #f8d7da
-participant "IO Pool" as IO #ffeeba
+![Async process](https://img.plantuml.biz/plantuml/png/RL7BJiGW5Dtp5JUpdn_emWpfHDDL3Mgw9fsp859WBhVw-m9rrAeB2ETn3uTmoc9PriKhEqjawhr349KAwMQNR10wQ6RtPls1R2QzbmokAx8qoUobAV8hE3Tfsal3sDXXL6gxZuvtf3jwG01R0V4MgwmNkb-zLqIwUZPtHsUEIS5da9vd9C7bvZ0TFTKN5MmgdZhg7ryeCNum1XusVp73s9L5xzRLiN8wRa7d6F0x9-RggRsUtOAuLlHfkPNx5bh3FYx9G_3NQ91J3Aq7mkMVVfKzbQrypmS0 "Async")
 
-Client -> Arrival: Generate request
-alt System full
-    Arrival -> Client: Reject
-else Accepted
-    Arrival -> Request: Start request_process
-    Request -> Workers: Acquire worker
-    Request -> Request: CPU Pre
-    Request -> Workers: Release worker
-    Request -> IO: Acquire I/O
-    IO --> Request: I/O complete
-    Request -> Workers: Acquire worker
-    Request -> Request: CPU Post
-    alt Timeout
-        Request -> Client: Timeout
-    else Completed
-        Request -> Client: Response
-    end
-    Request -> Workers: Release worker
-end
-@enduml
-```
+[Open in PlantUML Editor](https://editor.plantuml.com/uml/RL7BJiGW5Dtp5JUpdn_emWpfHDDL3Mgw9fsp859WBhVw-m9rrAeB2ETn3uTmoc9PriKhEqjawhr349KAwMQNR10wQ6RtPls1R2QzbmokAx8qoUobAV8hE3Tfsal3sDXXL6gxZuvtf3jwG01R0V4MgwmNkb-zLqIwUZPtHsUEIS5da9vd9C7bvZ0TFTKN5MmgdZhg7ryeCNum1XusVp73s9L5xzRLiN8wRa7d6F0x9-RggRsUtOAuLlHfkPNx5bh3FYx9G_3NQ91J3Aq7mkMVVfKzbQrypmS0)
 
 ---
 
 ## 🚀 Roadmap
 
-* [ ] Add visualization of **worker occupancy vs CPU busy**.
-* [ ] Validate **resource cleanup** on timeout via stress tests.
-* [ ] Explore **priority queues**.
-* [ ] Extend to **multi-process scaling**.
+* [ ] Combine multiple arrival distributions.
 
 ---
 
 ## 🤝 Contributing
 
-Contributions welcome! Ideas:
+Ideas welcome:
 
 * More arrival distributions
 * More service time models
-* Better visualization dashboards
 * Real workload traces as input
+* Would it be possible to add saturation?
 
 ---
 
 ## 📜 License
 
-Apache 2.0
+**Apache 2.0**
