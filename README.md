@@ -152,3 +152,15 @@ Ideas welcome:
 ## 📜 License
 
 **Apache 2.0**
+
+---
+
+## Load testing & metrics with k6
+
+A k6-based open-loop load test is provided under `loadtest/` to compare client latency and server service time for sync vs async modes.
+
+```bash
+k6 run -e MODE=async -e RPS=100 -e DURATION=30s loadtest/sim.js
+```
+
+See `loadtest/README.md` for detailed metrics and methodology.
